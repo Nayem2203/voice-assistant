@@ -1,11 +1,11 @@
 import os
-import time
-from google import genai 
+import io
+import base64
 from flask import Flask, request, send_file, jsonify
+from google import genai
 from gtts import gTTS
 
-# 1. New Client Setup - pulling from Render environment variables
-# Note: Ensure you named it GEMINI_API_KEY in the Render dashboard!
+# 1. Setup - Pull key from Render Environment Variables
 MY_API_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=MY_API_KEY)
 
@@ -15,45 +15,47 @@ app = Flask(__name__)
 def process_voice():
     try:
         if 'audio' not in request.files:
-            return jsonify({"error": "No audio file found"}), 400
+            return jsonify({"error": "No audio file"}), 400
 
+        # Read audio directly into memory (Fast)
         audio_file = request.files['audio']
-        audio_path = "temp_audio.wav"
-        audio_file.save(audio_path)
+        audio_bytes = audio_file.read()
+        
+        # 2. Prepare Inline Data (Skips the slow 'upload' step)
+        audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
 
-        # 2. Upload using the Client
-        print("Uploading to Gemini...")
-        uploaded_file = client.files.upload(file=audio_path)
-
-        print("Gemini is thinking...")
-        # 3. Generate Content
-        # We use gemini-1.5-flash for maximum stability on free tiers
+        print("Gemini is listening...")
+        # 3. Generate Content (Using 1.5-Flash for speed/stability)
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[
-                "Listen to this audio and respond as a helpful assistant. Keep it under 50 words.",
-                uploaded_file
+                "Respond briefly and helpfully in under 30 words.",
+                {"mime_type": "audio/wav", "data": audio_base64}
             ]
         )
         
         bot_text = response.text
-        print(f"Bot response: {bot_text}")
+        print(f"Response: {bot_text}")
 
-        # 4. Voice Generation
+        # 4. Generate Speech in RAM (No disk write = Faster)
         tts = gTTS(text=bot_text, lang='en')
-        output_path = "response.mp3"
-        tts.save(output_path)
+        audio_stream = io.BytesIO()
+        tts.write_to_fp(audio_stream)
+        audio_stream.seek(0)
 
-        # Cleanup Gemini file on their server (keeps your project clean)
-        client.files.delete(name=uploaded_file.name)
-
-        return send_file(output_path, mimetype="audio/mpeg")
+        # Send back the MP3 stream
+        return send_file(
+            audio_stream, 
+            mimetype="audio/mpeg", 
+            as_attachment=False, 
+            download_name="response.mp3"
+        )
 
     except Exception as e:
         print(f"Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    # Render requires the app to bind to the PORT environment variable
+    # Binds to Render's dynamic port
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
