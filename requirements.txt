@@ -3,3 +3,5 @@ google-genai
 gTTS
 gunicorn
 pydub
+pydub
+audioop-lts
