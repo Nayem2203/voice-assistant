@@ -4,6 +4,7 @@ from flask import Flask, request, send_file, jsonify
 from google import genai
 from google.genai import types 
 from gtts import gTTS
+from pydub import AudioSegment
 
 # Setup Client
 MY_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -12,7 +13,6 @@ client = genai.Client(api_key=MY_API_KEY)
 app = Flask(__name__)
 
 def is_bangla(text):
-    # Checks if the text contains characters in the Bengali Unicode range
     return any('\u0980' <= char <= '\u09FF' for char in text)
 
 @app.route('/process', methods=['POST'])
@@ -24,41 +24,43 @@ def process_voice():
         audio_file = request.files['audio']
         audio_bytes = audio_file.read()
         
-        print("Gemini is listening...")
-        
-        # 1. Multi-language Prompt
+        # 1. Personality Prompt (Cute/Pet Robot)
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[
-                "Listen to the audio. Response as you are friend"
-                "If they speak Bangla, respond in natural Bangla. If English, respond in English. "
-                "Keep the response brief (under 20 words).",
-                types.Part.from_bytes(
-                    data=audio_bytes,
-                    mime_type='audio/wav'
-                )
+                "Act as a cute pet robot. Respond in the same language the user speaks. "
+                "Be very sweet, helpful, and high-energy. Keep it under 20 words.",
+                types.Part.from_bytes(data=audio_bytes, mime_type='audio/wav')
             ]
         )
         
         bot_text = response.text
-        print(f"Bot response: {bot_text}")
-
-        # 2. Dynamic Language Selection for Voice
         lang_code = 'bn' if is_bangla(bot_text) else 'en'
-        print(f"Using voice language: {lang_code}")
 
-        # 3. Voice Generation in RAM
+        # 2. Generate standard voice in RAM
         tts = gTTS(text=bot_text, lang=lang_code)
-        audio_stream = io.BytesIO()
-        tts.write_to_fp(audio_stream)
-        audio_stream.seek(0)
+        temp_stream = io.BytesIO()
+        tts.write_to_fp(temp_stream)
+        temp_stream.seek(0)
 
-        return send_file(
-            audio_stream, 
-            mimetype="audio/mpeg", 
-            as_attachment=False, 
-            download_name="response.mp3"
-        )
+        # 3. CARTOON EFFECT (The Pitch Shift)
+        # Load the MP3 into pydub
+        sound = AudioSegment.from_file(temp_stream, format="mp3")
+        
+        # Shift the sample rate up to make it sound "squeaky"
+        # 1.3 is "Cute Child", 1.5 is "Chipmunk/Tiny Robot"
+        octaves = 0.4
+        new_sample_rate = int(sound.frame_rate * (2.0 ** octaves))
+        
+        cartoon_sound = sound._spawn(sound.raw_data, overrides={'frame_rate': new_sample_rate})
+        cartoon_sound = cartoon_sound.set_frame_rate(sound.frame_rate)
+
+        # 4. Final Export
+        output_stream = io.BytesIO()
+        cartoon_sound.export(output_stream, format="mp3")
+        output_stream.seek(0)
+
+        return send_file(output_stream, mimetype="audio/mpeg")
 
     except Exception as e:
         print(f"Error: {e}")
