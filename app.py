@@ -1,25 +1,30 @@
+# --- THE COMPATIBILITY SHIM (MUST BE AT THE VERY TOP) ---
 import sys
+try:
+    import audioop
+except ImportError:
+    try:
+        import audioop_lts as audioop
+        sys.modules['audioop'] = audioop
+    except ImportError:
+        print("Warning: audioop-lts not found. Cartoon effect may fail.")
+
 import os
 import io
-
-# 1. Compatibility Shim for Python 3.13+
-try:
-    import audioop_lts as audioop
-    sys.modules['audioop'] = audioop
-except ImportError:
-    pass
-
 from flask import Flask, request, send_file, jsonify
 from google import genai
 from google.genai import types 
 from gtts import gTTS
 from pydub import AudioSegment
 
-# Initialize Gemini
-client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+# Setup Client
+MY_API_KEY = os.environ.get("GEMINI_API_KEY")
+client = genai.Client(api_key=MY_API_KEY)
+
 app = Flask(__name__)
 
 def is_bangla(text):
+    """Detects if string contains Bengali characters."""
     return any('\u0980' <= char <= '\u09FF' for char in text)
 
 @app.route('/process', methods=['POST'])
@@ -27,52 +32,62 @@ def process_voice():
     try:
         if 'audio' not in request.files:
             return jsonify({"error": "No audio file"}), 400
-            
-        audio_file = request.files['audio']
-        audio_data = audio_file.read()
 
-        # Brain: Ask Gemini to be a robot
+        audio_file = request.files['audio']
+        audio_bytes = audio_file.read()
+        
+        print("Gemini is listening...")
+        
+        # 1. Multi-language Personality Prompt
+        # We tell Gemini to act cute and match the user's language
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[
-                "Act as a tiny, sweet pet robot. Speak in the user's language. "
-                "Start with a tiny robot sound like 'Beep-boop!' or 'বিপ-বিপ!'. "
+                "You are a tiny, sweet pet robot. Speak in the user's language. "
+                "Start with a tiny robot sound like 'Beep!' or 'Boop!'. "
                 "Keep it very short and cute (under 15 words).",
-                types.Part.from_bytes(data=audio_data, mime_type='audio/wav')
+                types.Part.from_bytes(data=audio_bytes, mime_type='audio/wav')
             ]
         )
+        
         bot_text = response.text
+        print(f"Bot says: {bot_text}")
+
+        # 2. Select voice language
         lang_code = 'bn' if is_bangla(bot_text) else 'en'
 
-        # Voice: Generate standard gTTS
+        # 3. Generate voice in RAM
         tts = gTTS(text=bot_text, lang=lang_code)
         temp_stream = io.BytesIO()
         tts.write_to_fp(temp_stream)
         temp_stream.seek(0)
 
-        try:
-            # Effect: Pitch Shift (The "Cute" part)
-            # This requires ffmpeg to be installed on the server!
-            sound = AudioSegment.from_file(temp_stream, format="mp3")
-            
-            # 1.2x pitch = Sweet Robot
-            new_sample_rate = int(sound.frame_rate * 1.2) 
-            pet_voice = sound._spawn(sound.raw_data, overrides={'frame_rate': new_sample_rate})
-            pet_voice = pet_voice.set_frame_rate(sound.frame_rate)
-            
-            output_stream = io.BytesIO()
-            pet_voice.export(output_stream, format="mp3")
-            output_stream.seek(0)
-            return send_file(output_stream, mimetype="audio/mpeg")
-            
-        except Exception as effect_error:
-            # If ffmpeg is missing or pydub fails, send the normal voice
-            print(f"Effect failed: {effect_error}")
-            temp_stream.seek(0)
-            return send_file(temp_stream, mimetype="audio/mpeg")
+        # 4. THE CARTOON EFFECT (Pitch Shifting)
+        # Load audio and increase sample rate to make it squeaky
+        sound = AudioSegment.from_file(temp_stream, format="mp3")
+        
+        # 0.4 octaves up = Cute Robot/Child. 0.6 = Chipmunk.
+        octaves = 0.4 
+        new_sample_rate = int(sound.frame_rate *1.3)
+        
+        # Apply the pitch shift
+        cartoon_sound = sound._spawn(sound.raw_data, overrides={'frame_rate': new_sample_rate})
+        cartoon_sound = cartoon_sound.set_frame_rate(sound.frame_rate)
+
+        # 5. Export back to stream
+        output_stream = io.BytesIO()
+        cartoon_sound.export(output_stream, format="mp3")
+        output_stream.seek(0)
+
+        return send_file(
+            output_stream, 
+            mimetype="audio/mpeg", 
+            as_attachment=False, 
+            download_name="response.mp3"
+        )
 
     except Exception as e:
-        print(f"General Error: {e}")
+        print(f"Server Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
