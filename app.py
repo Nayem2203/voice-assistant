@@ -6,7 +6,7 @@ from flask import Flask, request, send_file, jsonify
 from gtts import gTTS
 
 # 1. New Client Setup
-MY_API_KEY = "AQ.Ab8RN6JaAIFCGiTl81c7ph-LHn6ch3mvRRr8HbtyMeUaDL2gDA"
+MY_API_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=MY_API_KEY)
 
 app = Flask(__name__)
@@ -28,7 +28,7 @@ def process_voice():
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[
-                "Listen to this audio and respond as a helpful assistant. Keep it under 50 words.",
+                "Listen to this audio and respond as a helpful assistant. Keep it under 20 words.",
                 uploaded_file
             ]
         )
