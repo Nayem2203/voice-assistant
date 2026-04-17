@@ -1,8 +1,6 @@
 import os
 import io
-import base64
 from flask import Flask, request, send_file, jsonify
-# 🟢 Note the updated imports for types
 from google import genai
 from google.genai import types 
 from gtts import gTTS
@@ -12,6 +10,10 @@ MY_API_KEY = os.environ.get("GEMINI_API_KEY")
 client = genai.Client(api_key=MY_API_KEY)
 
 app = Flask(__name__)
+
+def is_bangla(text):
+    # Checks if the text contains characters in the Bengali Unicode range
+    return any('\u0980' <= char <= '\u09FF' for char in text)
 
 @app.route('/process', methods=['POST'])
 def process_voice():
@@ -23,11 +25,14 @@ def process_voice():
         audio_bytes = audio_file.read()
         
         print("Gemini is listening...")
-        # 🟢 FIX: Use types.Part.from_bytes to satisfy Pydantic validation
+        
+        # 1. Multi-language Prompt
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[
-                "Respond briefly as a helpful assistant in under 30 words.",
+                "Listen to the audio. Response as you are friend"
+                "If they speak Bangla, respond in natural Bangla. If English, respond in English. "
+                "Keep the response brief (under 20 words).",
                 types.Part.from_bytes(
                     data=audio_bytes,
                     mime_type='audio/wav'
@@ -36,10 +41,14 @@ def process_voice():
         )
         
         bot_text = response.text
-        print(f"Response: {bot_text}")
+        print(f"Bot response: {bot_text}")
 
-        # Voice Generation in RAM
-        tts = gTTS(text=bot_text, lang='en')
+        # 2. Dynamic Language Selection for Voice
+        lang_code = 'bn' if is_bangla(bot_text) else 'en'
+        print(f"Using voice language: {lang_code}")
+
+        # 3. Voice Generation in RAM
+        tts = gTTS(text=bot_text, lang=lang_code)
         audio_stream = io.BytesIO()
         tts.write_to_fp(audio_stream)
         audio_stream.seek(0)
@@ -52,8 +61,7 @@ def process_voice():
         )
 
     except Exception as e:
-        # Print the full error to Render logs so we can see it
-        print(f"Error occurred: {e}")
+        print(f"Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
