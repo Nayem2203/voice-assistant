@@ -1,93 +1,114 @@
+# ================== IMPORTS ==================
 import sys
-import time
-import threading
 import os
-from flask import Flask, request, jsonify, send_file
+import io
+from flask import Flask, request, send_file, jsonify
 
+# audioop fix
+try:
+    import audioop
+except ImportError:
+    import audioop_lts as audioop
+    sys.modules['audioop'] = audioop
+
+from google import genai
+from google.genai import types
+from gtts import gTTS
+from pydub import AudioSegment
+
+# ================== SETUP ==================
 app = Flask(__name__)
 
-# 🔁 Track last request time
-last_request_time = time.time()
+API_KEY = os.environ.get("GEMINI_API_KEY")
+print("🔑 API KEY:", "OK" if API_KEY else "MISSING")
 
+client = genai.Client(api_key=API_KEY)
 
-# ✅ Root route (fix 404 issue)
-@app.route("/")
+# ================== HELPER ==================
+def is_bangla(text):
+    return any('\u0980' <= c <= '\u09FF' for c in text)
+
+# ================== ROUTES ==================
+
+@app.route('/')
 def home():
-    return "✅ Voice Server is Running!"
+    return "✅ Server is running!"
 
+@app.route('/process', methods=['POST'])
+def process_audio():
+    try:
+        print("\n==============================")
+        print("➡ Incoming Request")
+        print("==============================")
 
-# 🔊 Log every request
-@app.before_request
-def log_request():
-    global last_request_time
-    last_request_time = time.time()
-    print("\n==============================")
-    print(f"➡ Incoming: {request.method} {request.url}")
-    print("==============================")
+        # -------- RECEIVE AUDIO --------
+        if request.data:
+            audio_bytes = request.data
+            print("📡 Source: ESP32 RAW")
+        elif 'audio' in request.files:
+            audio_bytes = request.files['audio'].read()
+            print("📱 Source: Mobile Upload")
+        else:
+            print("❌ No audio received")
+            return jsonify({"error": "No audio"}), 400
 
+        print(f"📦 Audio size: {len(audio_bytes)} bytes")
 
-# 🎤 Upload route (ESP32 sends audio here)
-@app.route("/upload", methods=["POST"])
-def upload():
+        # -------- GEMINI --------
+        print("🤖 Sending to Gemini...")
 
-    if 'file' not in request.files:
-        print("❌ No file received!")
-        return jsonify({"status": "fail", "message": "No file"}), 400
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                "You are a tiny robot. Reply short. Start with Beep!",
+                types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")
+            ]
+        )
 
-    file = request.files['file']
+        bot_text = response.text.strip()
+        print("💬 Gemini reply:", bot_text)
 
-    if file.filename == '':
-        print("❌ Empty file!")
-        return jsonify({"status": "fail", "message": "Empty file"}), 400
+        # -------- TTS --------
+        lang = "bn" if is_bangla(bot_text) else "en"
 
-    print("✅ File received from ESP32!")
+        tts = gTTS(text=bot_text, lang=lang)
 
-    # 💾 Save file
-    file_path = "received.wav"
-    file.save(file_path)
+        mp3_stream = io.BytesIO()
+        tts.write_to_fp(mp3_stream)
+        mp3_stream.seek(0)
 
-    # 📊 File size check
-    file_size = os.path.getsize(file_path)
-    print(f"📦 File size: {file_size} bytes")
+        print("🔊 Converting to WAV...")
 
-    # ⚠ If file too small
-    if file_size < 100:
-        print("⚠ Warning: Audio file too small!")
+        sound = AudioSegment.from_file(mp3_stream, format="mp3")
+        sound = sound.set_frame_rate(16000)
+        sound = sound.set_channels(1)
+        sound = sound.set_sample_width(2)
 
-    # 🧠 ===== PROCESS HERE =====
-    # You can add:
-    # - Speech to text
-    # - AI response
-    # - Text to speech
+        # cartoon effect
+        new_rate = int(sound.frame_rate * 1.25)
+        sound = sound._spawn(sound.raw_data, overrides={"frame_rate": new_rate})
+        sound = sound.set_frame_rate(16000)
 
-    # For now: dummy response file
-    response_audio = "response.wav"
+        # -------- EXPORT --------
+        output = io.BytesIO()
+        sound.export(output, format="wav")
+        output.seek(0)
 
-    # If no response file exists → create dummy
-    if not os.path.exists(response_audio):
-        with open(response_audio, "wb") as f:
-            f.write(b'\x00\x00')  # placeholder
+        print(f"📤 Sending response: {output.getbuffer().nbytes} bytes")
+        print("==============================\n")
 
-    print("🔊 Sending response back to ESP32...")
+        return send_file(
+            output,
+            mimetype="audio/wav",
+            as_attachment=False
+        )
 
-    return send_file(response_audio, mimetype="audio/wav")
+    except Exception as e:
+        print("❌ ERROR:", str(e))
+        return jsonify({"error": str(e)}), 500
 
-
-# ⏱ Monitor if no data received
-def monitor():
-    global last_request_time
-    while True:
-        if time.time() - last_request_time > 10:
-            print("⚠ No data received in last 10 seconds")
-        time.sleep(5)
-
-
-# 🚀 Start monitor thread
-threading.Thread(target=monitor, daemon=True).start()
-
-
-# ▶ Run server
+# ================== RUN ==================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    print(f"🚀 Server starting on port {port}...")
+    print(f"🚀 Running on port {port}")
     app.run(host="0.0.0.0", port=port)
