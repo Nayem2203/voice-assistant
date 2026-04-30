@@ -24,91 +24,74 @@ print("🔑 API KEY:", "OK" if API_KEY else "MISSING")
 
 client = genai.Client(api_key=API_KEY)
 
-# ================== HELPER ==================
-def is_bangla(text):
-    return any('\u0980' <= c <= '\u09FF' for c in text)
-
 # ================== ROUTES ==================
-
 @app.route('/')
 def home():
-    return "✅ Server is running!"
+    return "✅ Server running"
 
 @app.route('/process', methods=['POST'])
 def process_audio():
     try:
         print("\n==============================")
-        print("➡ Incoming Request")
-        print("==============================")
+        print("➡ Incoming request")
 
-        # -------- RECEIVE AUDIO --------
+        # -------- RECEIVE --------
         if request.data:
             audio_bytes = request.data
             print("📡 Source: ESP32 RAW")
         elif 'audio' in request.files:
             audio_bytes = request.files['audio'].read()
-            print("📱 Source: Mobile Upload")
+            print("📱 Source: file upload")
         else:
-            print("❌ No audio received")
+            print("❌ No audio")
             return jsonify({"error": "No audio"}), 400
 
-        print(f"📦 Audio size: {len(audio_bytes)} bytes")
+        print(f"📦 Size: {len(audio_bytes)} bytes")
+
+        # show first few bytes (debug)
+        print("🔍 First 20 bytes:", audio_bytes[:20])
 
         # -------- GEMINI --------
-        print("🤖 Sending to Gemini...")
-
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[
-                "You are a tiny robot. Reply short. Start with Beep!",
+                "Reply very short (max 8 words). Start with Beep!",
                 types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")
             ]
         )
 
         bot_text = response.text.strip()
-        print("💬 Gemini reply:", bot_text)
+        print("🤖 Reply:", bot_text)
 
         # -------- TTS --------
-        lang = "bn" if is_bangla(bot_text) else "en"
+        tts = gTTS(text=bot_text, lang="en")
 
-        tts = gTTS(text=bot_text, lang=lang)
+        mp3 = io.BytesIO()
+        tts.write_to_fp(mp3)
+        mp3.seek(0)
 
-        mp3_stream = io.BytesIO()
-        tts.write_to_fp(mp3_stream)
-        mp3_stream.seek(0)
+        sound = AudioSegment.from_file(mp3, format="mp3")
 
-        print("🔊 Converting to WAV...")
-
-        sound = AudioSegment.from_file(mp3_stream, format="mp3")
+        # normalize for ESP32
         sound = sound.set_frame_rate(16000)
         sound = sound.set_channels(1)
         sound = sound.set_sample_width(2)
 
-        # cartoon effect
-        new_rate = int(sound.frame_rate * 1.25)
-        sound = sound._spawn(sound.raw_data, overrides={"frame_rate": new_rate})
-        sound = sound.set_frame_rate(16000)
+        # -------- EXPORT WAV --------
+        out = io.BytesIO()
+        sound.export(out, format="wav")
+        out.seek(0)
 
-        # -------- EXPORT --------
-        output = io.BytesIO()
-        sound.export(output, format="wav")
-        output.seek(0)
-
-        print(f"📤 Sending response: {output.getbuffer().nbytes} bytes")
+        print(f"📤 Sending back: {out.getbuffer().nbytes} bytes")
         print("==============================\n")
 
-        return send_file(
-            output,
-            mimetype="audio/wav",
-            as_attachment=False
-        )
+        return send_file(out, mimetype="audio/wav")
 
     except Exception as e:
-        print("❌ ERROR:", str(e))
+        print("❌ ERROR:", e)
         return jsonify({"error": str(e)}), 500
 
 # ================== RUN ==================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    print(f"🚀 Running on port {port}")
     app.run(host="0.0.0.0", port=port)
