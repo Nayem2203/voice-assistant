@@ -4,7 +4,6 @@ import os
 import io
 from flask import Flask, request, send_file, jsonify
 
-# audioop fix
 try:
     import audioop
 except ImportError:
@@ -16,80 +15,89 @@ from google.genai import types
 from gtts import gTTS
 from pydub import AudioSegment
 
-# ================== SETUP ==================
 app = Flask(__name__)
 
 API_KEY = os.environ.get("GEMINI_API_KEY")
-print("🔑 API KEY:", "OK" if API_KEY else "MISSING")
-
 client = genai.Client(api_key=API_KEY)
 
+# ================== HELPER ==================
+def is_bangla(text):
+    return any('\u0980' <= c <= '\u09FF' for c in text)
+
 # ================== ROUTES ==================
+
 @app.route('/')
 def home():
-    return "✅ Server running"
+    return "Server OK"
 
 @app.route('/process', methods=['POST'])
 def process_audio():
     try:
-        print("\n==============================")
-        print("➡ Incoming request")
+        print("\n====== NEW REQUEST ======")
 
-        # -------- RECEIVE --------
+        # -------- RECEIVE AUDIO --------
         if request.data:
             audio_bytes = request.data
-            print("📡 Source: ESP32 RAW")
-        elif 'audio' in request.files:
-            audio_bytes = request.files['audio'].read()
-            print("📱 Source: file upload")
+            print("📡 ESP32 RAW audio received")
         else:
-            print("❌ No audio")
             return jsonify({"error": "No audio"}), 400
 
-        print(f"📦 Size: {len(audio_bytes)} bytes")
+        print("📦 Size:", len(audio_bytes))
 
-        # show first few bytes (debug)
-        print("🔍 First 20 bytes:", audio_bytes[:20])
+        # -------- SPEECH TO TEXT --------
+        print("🧠 Converting speech to text...")
 
-        # -------- GEMINI --------
-        response = client.models.generate_content(
+        stt_response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=[
-                "Reply very short (max 8 words). Start with Beep!",
+                "Convert this speech to text only.",
                 types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")
             ]
         )
 
-        bot_text = response.text.strip()
-        print("🤖 Reply:", bot_text)
+        user_text = stt_response.text.strip()
+        print("🗣 User said:", user_text)
 
-        # -------- TTS --------
-        tts = gTTS(text=bot_text, lang="en")
+        # -------- GENERATE RESPONSE --------
+        print("🤖 Generating reply...")
 
-        mp3 = io.BytesIO()
-        tts.write_to_fp(mp3)
-        mp3.seek(0)
+        reply = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                f"User said: {user_text}. Reply short and friendly."
+            ]
+        )
 
-        sound = AudioSegment.from_file(mp3, format="mp3")
+        bot_text = reply.text.strip()
+        print("💬 Bot reply:", bot_text)
 
-        # normalize for ESP32
+        # -------- TEXT TO SPEECH --------
+        lang = "bn" if is_bangla(bot_text) else "en"
+
+        tts = gTTS(text=bot_text, lang=lang)
+
+        mp3_stream = io.BytesIO()
+        tts.write_to_fp(mp3_stream)
+        mp3_stream.seek(0)
+
+        # convert to WAV
+        sound = AudioSegment.from_file(mp3_stream, format="mp3")
         sound = sound.set_frame_rate(16000)
         sound = sound.set_channels(1)
         sound = sound.set_sample_width(2)
 
-        # -------- EXPORT WAV --------
-        out = io.BytesIO()
-        sound.export(out, format="wav")
-        out.seek(0)
+        output = io.BytesIO()
+        sound.export(output, format="wav")
+        output.seek(0)
 
-        print(f"📤 Sending back: {out.getbuffer().nbytes} bytes")
-        print("==============================\n")
+        print("🔊 Sending audio back\n")
 
-        return send_file(out, mimetype="audio/wav")
+        return send_file(output, mimetype="audio/wav")
 
     except Exception as e:
         print("❌ ERROR:", e)
         return jsonify({"error": str(e)}), 500
+
 
 # ================== RUN ==================
 if __name__ == "__main__":
