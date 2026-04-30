@@ -1,4 +1,4 @@
-# --- THE COMPATIBILITY SHIM (MUST BE AT THE VERY TOP) ---
+# ================== COMPATIBILITY FIX ==================
 import sys
 try:
     import audioop
@@ -7,89 +7,99 @@ except ImportError:
         import audioop_lts as audioop
         sys.modules['audioop'] = audioop
     except ImportError:
-        print("Warning: audioop-lts not found. Cartoon effect may fail.")
+        print("audioop missing")
 
+# ================== IMPORTS ==================
 import os
 import io
 from flask import Flask, request, send_file, jsonify
+
 from google import genai
-from google.genai import types 
+from google.genai import types
+
 from gtts import gTTS
 from pydub import AudioSegment
 
-# Setup Client
-MY_API_KEY = os.environ.get("GEMINI_API_KEY")
-client = genai.Client(api_key=MY_API_KEY)
-
+# ================== SETUP ==================
 app = Flask(__name__)
 
-def is_bangla(text):
-    """Detects if string contains Bengali characters."""
-    return any('\u0980' <= char <= '\u09FF' for char in text)
+API_KEY = os.environ.get("GEMINI_API_KEY")
+client = genai.Client(api_key=API_KEY)
 
+# ================== LANGUAGE DETECTION ==================
+def is_bangla(text):
+    return any('\u0980' <= c <= '\u09FF' for c in text)
+
+# ================== MAIN ROUTE ==================
 @app.route('/process', methods=['POST'])
-def process_voice():
+def process_audio():
     try:
+        # 1. CHECK AUDIO
         if 'audio' not in request.files:
             return jsonify({"error": "No audio file"}), 400
 
         audio_file = request.files['audio']
         audio_bytes = audio_file.read()
-        
-        print("Gemini is listening...")
-        
-        # 1. Multi-language Personality Prompt
-        # We tell Gemini to act cute and match the user's language
+
+        print("🎤 Received audio from ESP32")
+
+        # ================== 2. GEMINI PROCESS ==================
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model="gemini-2.5-flash",
             contents=[
-                "You are a tiny, sweet pet robot. Speak in the user's language. "
-                "Start with a tiny robot sound like 'Beep!' or 'Boop!'. "
-                "Keep it very short and cute (under 15 words).",
-                types.Part.from_bytes(data=audio_bytes, mime_type='audio/wav')
+                "You are a tiny cute robot. Reply very short (max 10 words). Start with Beep!",
+                types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav")
             ]
         )
-        
-        bot_text = response.text
-        print(f"Bot says: {bot_text}")
 
-        # 2. Select voice language
-        lang_code = 'bn' if is_bangla(bot_text) else 'en'
+        bot_text = response.text.strip()
+        print("🤖 Bot:", bot_text)
 
-        # 3. Generate voice in RAM
-        tts = gTTS(text=bot_text, lang=lang_code)
-        temp_stream = io.BytesIO()
-        tts.write_to_fp(temp_stream)
-        temp_stream.seek(0)
+        # ================== 3. TEXT TO SPEECH ==================
+        lang = "bn" if is_bangla(bot_text) else "en"
 
-        # 4. THE CARTOON EFFECT (Pitch Shifting)
-        # Load audio and increase sample rate to make it squeaky
-        sound = AudioSegment.from_file(temp_stream, format="mp3")
-        
-        # 0.4 octaves up = Cute Robot/Child. 0.6 = Chipmunk.
-        octaves = 0.4 
-        new_sample_rate = int(sound.frame_rate *1.3)
-        
-        # Apply the pitch shift
-        cartoon_sound = sound._spawn(sound.raw_data, overrides={'frame_rate': new_sample_rate})
-        cartoon_sound = cartoon_sound.set_frame_rate(sound.frame_rate)
+        tts = gTTS(text=bot_text, lang=lang)
 
-        # 5. Export back to stream
-        output_stream = io.BytesIO()
-        cartoon_sound.export(output_stream, format="mp3")
-        output_stream.seek(0)
+        mp3_stream = io.BytesIO()
+        tts.write_to_fp(mp3_stream)
+        mp3_stream.seek(0)
+
+        # ================== 4. CONVERT TO WAV ==================
+        sound = AudioSegment.from_file(mp3_stream, format="mp3")
+
+        # Normalize format for ESP32
+        sound = sound.set_frame_rate(16000)
+        sound = sound.set_channels(1)
+        sound = sound.set_sample_width(2)  # 16-bit
+
+        # ================== 5. CARTOON VOICE ==================
+        new_sample_rate = int(sound.frame_rate * 1.25)
+
+        cartoon = sound._spawn(
+            sound.raw_data,
+            overrides={"frame_rate": new_sample_rate}
+        ).set_frame_rate(16000)
+
+        # ================== 6. EXPORT WAV ==================
+        output = io.BytesIO()
+        cartoon.export(output, format="wav")
+        output.seek(0)
+
+        print("🔊 Sending response to ESP32")
 
         return send_file(
-            output_stream, 
-            mimetype="audio/mpeg", 
-            as_attachment=False, 
-            download_name="response.mp3"
+            output,
+            mimetype="audio/wav",
+            as_attachment=False,
+            download_name="response.wav"
         )
 
     except Exception as e:
-        print(f"Server Error: {e}")
+        print("❌ ERROR:", e)
         return jsonify({"error": str(e)}), 500
 
-if __name__ == '__main__':
+# ================== RUN ==================
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    print(f"🚀 Server running on port {port}")
+    app.run(host="0.0.0.0", port=port)
